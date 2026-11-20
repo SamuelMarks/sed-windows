@@ -23,7 +23,8 @@ Functions
 
   Fails if any ``.c``, ``.h``, or ``.h.in`` file is present in ``PROJECT_ROOT``
   outside ``tests/`` (ignoring ``build*``, ``_deps``, ``.git``, ``.vagrant``,
-  ``.watcom``, ``coverage*``, and any local ``sed/`` upstream checkout).
+  ``.watcom``, ``coverage*``, ``dist``, and any local ``sed/`` or
+  ``auto-win-msvc/`` dependency checkouts).
 
 .. command:: sed_verify_cmake_rst_docs
 
@@ -72,7 +73,7 @@ function(sed_verify_no_stray_c_files _root_dir)
     )
     set(_violations "")
     foreach(_rel IN LISTS _all_c_files)
-        if(_rel MATCHES [[^(tests/|build|_deps/|\.git/|\.vagrant/|vagrant/dos/\.vagrant/|vagrant/dos/\.watcom/|vagrant/dos/build|coverage|sed/)]])
+        if(_rel MATCHES [[^(tests/|build|_deps/|\.git/|\.vagrant/|vagrant/dos/\.vagrant/|vagrant/dos/\.watcom/|vagrant/dos/build|coverage|dist/|sed/|auto-win-msvc/)]])
             continue()
         endif()
         list(APPEND _violations "${_rel}")

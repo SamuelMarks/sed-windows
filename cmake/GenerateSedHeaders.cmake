@@ -51,7 +51,14 @@ Functions
   ``unictype.h``, ``uninorm.h``, ``selinux/*.h``, ``malloc/*.gl.h``, and
   conditional ``alloca.h`` on Windows/DOS) inside ``OUT_DIR``::
 
-    sed_generate_build_files(SED_DIR <dir> OUT_DIR <dir> [TARGET_DOS] [TARGET_WIN32])
+    sed_generate_build_files(
+        SED_DIR <dir>
+        OUT_DIR <dir>
+        [TARGET_DOS]
+        [TARGET_WIN32]
+        [HAVE_FWRITING]
+        [NO_HOST_GETPROGNAME]
+    )
 #]=======================================================================]
 
 cmake_minimum_required(VERSION 3.16)
@@ -147,10 +154,10 @@ function(_sed_set_cfg_define _var_name _macro _val)
 endfunction()
 
 # -----------------------------------------------------------------------------
-# sed_generate_build_files(SED_DIR <dir> OUT_DIR <dir> [TARGET_DOS] [TARGET_WIN32])
+# sed_generate_build_files(SED_DIR <dir> OUT_DIR <dir> [TARGET_DOS] [TARGET_WIN32] [HAVE_FWRITING] [NO_HOST_GETPROGNAME])
 # -----------------------------------------------------------------------------
 function(sed_generate_build_files)
-    set(_options TARGET_DOS TARGET_WIN32)
+    set(_options TARGET_DOS TARGET_WIN32 HAVE_FWRITING NO_HOST_GETPROGNAME)
     set(_oneValueArgs SED_DIR OUT_DIR)
     cmake_parse_arguments(_ARG "${_options}" "${_oneValueArgs}" "" ${ARGN})
 
@@ -524,7 +531,6 @@ int sed_watcom_pclose(FILE *fp) {
         HAVE_ERRNO_H
         HAVE_GETCWD
         HAVE_GETOPT_H
-        HAVE_GETPROGNAME
         HAVE_INTTYPES_H
         HAVE_ISASCII
         HAVE_ISATTY
@@ -569,6 +575,18 @@ int sed_watcom_pclose(FILE *fp) {
     )
         _sed_set_cfg_define(_cfg "${_hdr_def}" "1")
     endforeach()
+
+    if(NOT _ARG_NO_HOST_GETPROGNAME)
+        _sed_set_cfg_define(_cfg "HAVE_GETPROGNAME" "1")
+    else()
+        _sed_set_cfg_define(_cfg "HAVE_DECL_PROGRAM_INVOCATION_NAME" "1")
+        _sed_set_cfg_define(_cfg "HAVE_DECL_PROGRAM_INVOCATION_SHORT_NAME" "1")
+    endif()
+
+    if(_ARG_HAVE_FWRITING)
+        _sed_set_cfg_define(_cfg "HAVE_STDIO_EXT_H" "1")
+        _sed_set_cfg_define(_cfg "HAVE___FWRITING" "1")
+    endif()
 
     if(_ARG_TARGET_DOS)
         _sed_set_cfg_define(_cfg "HAVE_FOPEN_RT" "1")

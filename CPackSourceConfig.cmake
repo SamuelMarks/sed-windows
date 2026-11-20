@@ -16,6 +16,8 @@ set(CPACK_SOURCE_IGNORE_FILES
     "/build_"
     "/_deps/"
     "/sed/"
+    "/auto-win-msvc/"
+    "/dist/"
     "/\\.vagrant/"
     "/\\.watcom/"
     "/coverage"

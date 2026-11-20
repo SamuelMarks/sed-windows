@@ -53,7 +53,7 @@ jobs:
       - name: Install C89 QA & Coverage Tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y lcov clang-format
+          sudo apt-get install -y clang llvm lcov clang-format
           python3 -m pip install --upgrade pip pre-commit cpplint
 
       - name: Verify Strict ISO C89, Zero // Comments & 100% Doc Coverage
@@ -64,9 +64,15 @@ jobs:
         run: |
           pre-commit run --all-files
 
+      - name: Configure, Build & Test Host GNU GCC Suite (GNU sed 4.10 + C89 Tests)
+        run: |
+          cmake -S . -B build_gcc -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DAUTO_WIN_MSVC_DIR="$PWD/auto-win-msvc"
+          cmake --build build_gcc --parallel
+          ctest --test-dir build_gcc --output-on-failure
+
       - name: Configure & Build Host Coverage Suite (GNU sed 4.10 + C89 Tests)
         run: |
-          cmake -S . -B build_cov -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DSED_ENABLE_COVERAGE=ON -DAUTO_WIN_MSVC_DIR="$PWD/auto-win-msvc"
+          cmake -S . -B build_cov -DCMAKE_C_COMPILER=clang -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DSED_ENABLE_COVERAGE=ON -DAUTO_WIN_MSVC_DIR="$PWD/auto-win-msvc"
           cmake --build build_cov --parallel
 
       - name: Execute C89 CTest Suites & Enforce lcov 100% Coverage Gate
@@ -110,37 +116,52 @@ jobs:
         shell: cmd
         run: |
           cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.arch }} -DAUTO_WIN_MSVC_DIR="%CD%/auto-win-msvc"
+          if errorlevel 1 exit /b 1
           cmake --build build --parallel
+          if errorlevel 1 exit /b 1
 
       - name: Run Strict C89 CTest Suite (${{ matrix.arch }})
         if: matrix.run_tests
         shell: cmd
         run: |
           ctest --test-dir build --output-on-failure
+          if errorlevel 1 exit /b 1
           build\sed.exe --version
+          if errorlevel 1 exit /b 1
 
       - name: Run OpenCppCoverage Verification Gate (${{ matrix.arch }})
         if: matrix.run_tests
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           choco install opencppcoverage -y --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $occ = Get-ChildItem "${env:ProgramFiles}\OpenCppCoverage\OpenCppCoverage.exe", "${env:ProgramFiles(x86)}\OpenCppCoverage\OpenCppCoverage.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $occ) { throw "OpenCppCoverage.exe not found" }
           cmake -G Ninja -S . -B build_cov_win -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DSED_ENABLE_COVERAGE=ON -DSED_STATIC_CRT=OFF -DAUTO_WIN_MSVC_DIR="$PWD/auto-win-msvc"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build build_cov_win --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ctest --test-dir build_cov_win --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $occ.FullName --cover_children --export_type="cobertura:build_cov_win\coverage.xml" --sources "sed_test_harness.c" --sources "sed_test_inproc.c" --sources "sed\compile.c" --sources "sed\debug.c" --sources "sed\execute.c" --sources "sed\mbcs.c" --sources "sed\regexp.c" --sources "sed\sed.c" --sources "sed\utils.c" -- ctest --test-dir build_cov_win --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake -DPROJECT_ROOT="$PWD" -DCOBERTURA_XML="$PWD/build_cov_win/coverage.xml" -P cmake/VerifyCoverage.cmake
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Install NSIS & WiX Toolset (${{ matrix.arch }})
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           if (-not (Get-Command makensis.exe -ErrorAction SilentlyContinue)) {
             choco install nsis -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           $nsisDir = @("${env:ProgramFiles(x86)}\NSIS", "${env:ProgramFiles}\NSIS") | Where-Object { Test-Path "$_\makensis.exe" } | Select-Object -First 1
           if ($nsisDir) { echo "$nsisDir" >> $env:GITHUB_PATH }
           if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
             choco install wixtoolset -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           $wixBin = if ($env:WIX -and (Test-Path "$env:WIX\bin\candle.exe")) {
             "$env:WIX\bin"
@@ -152,6 +173,7 @@ jobs:
       - name: Package Windows ZIP, NSIS & WiX Installers (${{ matrix.arch }})
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $ver = if ($env:GITHUB_REF -like "refs/tags/v*") {
             $env:GITHUB_REF_NAME -replace '^v', ''
           } else {
@@ -162,11 +184,14 @@ jobs:
           $baseName = "sed-$ver-win-${{ matrix.arch }}"
           Push-Location build
           cpack -G ZIP -D "CPACK_PACKAGE_VERSION=$pkgVer" -D "CPACK_PACKAGE_FILE_NAME=$baseName"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (Get-Command makensis.exe -ErrorAction SilentlyContinue) {
             cpack -G NSIS -D "CPACK_PACKAGE_VERSION=$pkgVer" -D "CPACK_PACKAGE_FILE_NAME=$baseName-setup"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           if ((Get-Command candle.exe -ErrorAction SilentlyContinue) -and ("${{ matrix.arch }}" -eq "x64")) {
             cpack -G WIX -D "CPACK_PACKAGE_VERSION=$pkgVer" -D "CPACK_PACKAGE_FILE_NAME=$baseName"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           Pop-Location
           Get-ChildItem build\sed-*.zip, build\sed-*.exe, build\sed-*.msi -ErrorAction SilentlyContinue | Copy-Item -Destination dist\ -Force
@@ -193,23 +218,33 @@ jobs:
       - name: Install OpenWatcom v2 & Headless QEMU x86 DOS Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 mtools unzip xz-utils curl ruby
+          sudo apt-get install -y qemu-system-x86 unzip zip xz-utils curl ruby
           mkdir -p "$RUNNER_TEMP/watcom"
-          curl -fsSL -o "$RUNNER_TEMP/ow.tar.xz" "https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/ow-snapshot.tar.xz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/ow.tar.xz" "https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/ow-snapshot.tar.xz"
           tar -xJf "$RUNNER_TEMP/ow.tar.xz" -C "$RUNNER_TEMP/watcom"
+          rm -f "$RUNNER_TEMP/ow.tar.xz"
           echo "WATCOM=$RUNNER_TEMP/watcom" >> "$GITHUB_ENV"
-          echo "$RUNNER_TEMP/watcom/binl64:$RUNNER_TEMP/watcom/binw" >> "$GITHUB_PATH"
+          if [ -d "$RUNNER_TEMP/watcom/binl64" ]; then
+            echo "$RUNNER_TEMP/watcom/binl64:$RUNNER_TEMP/watcom/binw" >> "$GITHUB_PATH"
+          else
+            echo "$RUNNER_TEMP/watcom/binl:$RUNNER_TEMP/watcom/binw" >> "$GITHUB_PATH"
+          fi
 
       - name: Configure & Build SED.EXE + Strict-C89 (-za) DOS Test Binaries
         run: |
+          if [ -d "$WATCOM/binl64" ]; then
+            WATCOM_BIN="$WATCOM/binl64"
+          else
+            WATCOM_BIN="$WATCOM/binl"
+          fi
           export INCLUDE="$WATCOM/h"
           export EDPATH="$WATCOM/eddat"
           export WIPFC="$WATCOM/wipfc"
           cat > "$RUNNER_TEMP/dos_toolchain.cmake" <<EOF
           set(CMAKE_SYSTEM_NAME DOS)
-          set(CMAKE_SYSTEM_PROCESSOR I86)
-          set(WATCOM ON)
-          set(CMAKE_C_COMPILER "$WATCOM/binl64/wcl386")
+          set(CMAKE_SYSTEM_PROCESSOR I386)
+          set(CMAKE_C_COMPILER "$WATCOM_BIN/wcl386")
+          set(CMAKE_C_FLAGS_INIT "-bt=dos -mf -3r -zq")
           EOF
           cmake -G "Watcom WMake" -S . -B build_dos -DCMAKE_TOOLCHAIN_FILE="$RUNNER_TEMP/dos_toolchain.cmake" -DCMAKE_BUILD_TYPE=Release -DSED_TARGET_DOS=ON -DBUILD_TESTING=ON -DAUTO_WIN_MSVC_DIR="$PWD/auto-win-msvc"
           cmake --build build_dos
@@ -220,8 +255,15 @@ jobs:
           if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
             VER="${GITHUB_REF_NAME#v}"
           fi
+          PKG_VER="$VER"
+          if [[ "$PKG_VER" =~ ^[0-9]+\.[0-9]+$ ]]; then
+            PKG_VER="${PKG_VER}.0"
+          elif [[ ! "$PKG_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            PKG_VER="4.10.0"
+          fi
           mkdir -p dist
-          (cd build_dos && cpack -G ZIP -D "CPACK_PACKAGE_FILE_NAME=sed-${VER}-dos32")
+          cp "$WATCOM/binw/dos32a.exe" build_dos/dos32a.exe
+          (cd build_dos && cpack -G ZIP -D "CPACK_PACKAGE_VERSION=${PKG_VER}" -D "CPACK_PACKAGE_FILE_NAME=sed-${VER}-dos32")
           cp build_dos/sed-*-dos32.zip dist/
 
           ruby -e '
@@ -281,67 +323,155 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/fdboot"
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/fd13.zip" "https://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/distributions/1.3/official/FD13-FloppyEdition.zip"
-          unzip -q "$RUNNER_TEMP/fd13.zip" "x86BOOT.img" -d "$RUNNER_TEMP/fdboot"
-
-          dd if=/dev/zero of="$RUNNER_TEMP/dostest.img" bs=1M count=32 status=none
-          mformat -i "$RUNNER_TEMP/dostest.img" -F -v SEDTEST ::
-          mcopy -i "$RUNNER_TEMP/dostest.img" "$WATCOM/binw/dos32a.exe" ::/DOS32A.EXE
-          mcopy -i "$RUNNER_TEMP/dostest.img" build_dos/sed.exe ::/SED.EXE
-          mcopy -i "$RUNNER_TEMP/dostest.img" build_dos/t_hygien.exe ::/T_HYGIEN.EXE
-          mcopy -i "$RUNNER_TEMP/dostest.img" build_dos/t_cli.exe ::/T_CLI.EXE
-          mcopy -i "$RUNNER_TEMP/dostest.img" build_dos/t_cmds.exe ::/T_CMDS.EXE
-          mcopy -i "$RUNNER_TEMP/dostest.img" build_dos/t_reg410.exe ::/T_REG410.EXE
-          mcopy -i "$RUNNER_TEMP/dostest.img" build_dos/t_white.exe ::/T_WHITE.EXE
+          unzip -j -o "$RUNNER_TEMP/fd13.zip" "144m/x86BOOT.img" -d "$RUNNER_TEMP/fdboot"
 
           ruby -e '
-            crlf = "#{13.chr}#{10.chr}"
-            bs = 92.chr
-            dir = ENV.fetch("RUNNER_TEMP")
-            File.binwrite(File.join(dir, "SEDPRG.SED"), "s/foo/FROM_DOS/g#{crlf}")
-            File.binwrite(File.join(dir, "SEDIN.TXT"), "foo 123#{crlf}abba#{crlf}")
-            File.binwrite(File.join(dir, "FDCONFIG.SYS"), [
-              "LASTDRIVE=Z",
-              "FILES=40",
-              "BUFFERS=20",
-              "SHELL=A:#{bs}COMMAND.COM A:#{bs} /E:1024 /P=A:#{bs}AUTOEXEC.BAT"
-            ].join(crlf) + crlf)
-            File.binwrite(File.join(dir, "AUTOEXEC.BAT"), [
+            work = ENV.fetch("RUNNER_TEMP")
+            watcom = ENV.fetch("WATCOM")
+            crlf = "\r\n"
+
+            floppy = File.binread(File.join(work, "fdboot", "x86BOOT.img")).b
+            bps = floppy[11, 2].unpack1("v")
+            spc = floppy[13, 1].unpack1("C")
+            res = floppy[14, 2].unpack1("v")
+            nfats = floppy[16, 1].unpack1("C")
+            root_ents = floppy[17, 2].unpack1("v")
+            spf = floppy[22, 2].unpack1("v")
+            root_off = (res + nfats * spf) * bps
+            data_off = root_off + root_ents * 32
+
+            fdauto_body = [
+              "@ECHO OFF",
+              "SET PATH=C:\\;A:\\FREEDOS\\BIN",
+              "SET TEMP=C:\\TEMP",
+              "C:",
+              "CALL C:\\RUNTESTS.BAT",
+              "A:\\FREEDOS\\BIN\\FDAPM.COM POWEROFF"
+            ].join(crlf) + crlf
+
+            found = false
+            root_ents.times do |i|
+              eoff = root_off + i * 32
+              if floppy[eoff, 11] == "FDAUTO  BAT"
+                cl = floppy[eoff + 26, 2].unpack1("v")
+                doff = data_off + (cl - 2) * spc * bps
+                floppy[doff, spc * bps] = ("\x00" * (spc * bps)).b
+                floppy[doff, fdauto_body.bytesize] = fdauto_body.b
+                floppy[eoff + 28, 4] = [fdauto_body.bytesize].pack("V")
+                found = true
+                break
+              end
+            end
+            raise "FDAUTO.BAT not found in x86BOOT.img" unless found
+            File.binwrite(File.join(work, "fdboot", "boot_patched.img"), floppy)
+
+            cyls, heads, spt = 64, 16, 63
+            total_sectors = cyls * heads * spt
+            part_lba = 63
+            part_sectors = total_sectors - part_lba
+            img = ("\x00" * (total_sectors * 512)).b
+            img[446, 16] = [0x80, 1, 1, 0, 0x06, heads - 1, spt, cyls - 1, part_lba, part_sectors].pack("C8V2")
+            img[510, 2] = "\x55\xAA".b
+
+            spc16, res16, nfats16, root16, spf16 = 4, 1, 2, 512, 64
+            root_secs16 = (root16 * 32) / 512
+            bpb = ("\x00" * 512).b
+            bpb[0, 3] = "\xEB\x3C\x90".b
+            bpb[3, 8] = "MSDOS5.0".b
+            bpb[11, 25] = [512, spc16, res16, nfats16, root16, 0, 0xF8, spf16, spt, heads, part_lba, part_sectors].pack("vCvCvvCvvvVV")
+            bpb[36, 3] = [0x80, 0, 0x29].pack("C3")
+            bpb[39, 4] = [0x20260421].pack("V")
+            bpb[43, 11] = "SEDTEST    ".b
+            bpb[54, 8] = "FAT16   ".b
+            bpb[510, 2] = "\x55\xAA".b
+            poff = part_lba * 512
+            img[poff, 512] = bpb
+
+            fat1_off = poff + res16 * 512
+            fat2_off = fat1_off + spf16 * 512
+            [fat1_off, fat2_off].each { |fo| img[fo, 4] = [0xFFF8, 0xFFFF].pack("vv") }
+
+            r16_off = fat2_off + spf16 * 512
+            d16_off = r16_off + root_secs16 * 512
+            cl_bytes = spc16 * 512
+            next_cl = 2
+
+            runtests_bat = [
               "@ECHO OFF",
               "C:",
-              "DOS32A.EXE SED.EXE --version > C:#{bs}OUT.LOG",
+              "CD \\",
+              "SET TEMP=C:\\TEMP",
+              "CTTY COM1",
+              "DOS32A.EXE SED.EXE --version",
               "IF ERRORLEVEL 1 GOTO FAIL",
-              "DOS32A.EXE SED.EXE -f SEDPRG.SED SEDIN.TXT >> C:#{bs}OUT.LOG",
+              "DOS32A.EXE SED.EXE -f SEDPRG.SED SEDIN.TXT",
               "IF ERRORLEVEL 1 GOTO FAIL",
-              "DOS32A.EXE T_HYGIEN.EXE SED.EXE >> C:#{bs}OUT.LOG",
+              "DOS32A.EXE T_HYGIEN.EXE SED.EXE",
               "IF ERRORLEVEL 1 GOTO FAIL",
-              "DOS32A.EXE T_CLI.EXE >> C:#{bs}OUT.LOG",
+              "DOS32A.EXE T_CLI.EXE",
               "IF ERRORLEVEL 1 GOTO FAIL",
-              "DOS32A.EXE T_CMDS.EXE >> C:#{bs}OUT.LOG",
+              "DOS32A.EXE T_CMDS.EXE",
               "IF ERRORLEVEL 1 GOTO FAIL",
-              "DOS32A.EXE T_REG410.EXE >> C:#{bs}OUT.LOG",
+              "DOS32A.EXE T_REG410.EXE",
               "IF ERRORLEVEL 1 GOTO FAIL",
-              "DOS32A.EXE T_WHITE.EXE >> C:#{bs}OUT.LOG",
+              "DOS32A.EXE T_WHITE.EXE",
               "IF ERRORLEVEL 1 GOTO FAIL",
-              "ECHO ===ALL_DOS_CTESTS_PASSED=== >> C:#{bs}OUT.LOG",
+              "ECHO ===ALL_DOS_CTESTS_PASSED===",
               "GOTO DONE",
               ":FAIL",
-              "ECHO ===DOS_CTEST_FAILED=== >> C:#{bs}OUT.LOG",
-              ":DONE"
-            ].join(crlf) + crlf)
+              "ECHO ===DOS_CTEST_FAILED===",
+              ":DONE",
+              "CTTY CON"
+            ].join(crlf) + crlf
+
+            entries = [
+              ["TEMP", "", 0x10, "".b],
+              ["DOS32A", "EXE", 0x20, File.binread(File.join(watcom, "binw", "dos32a.exe")).b],
+              ["SED", "EXE", 0x20, File.binread("build_dos/sed.exe").b],
+              ["T_HYGIEN", "EXE", 0x20, File.binread("build_dos/t_hygien.exe").b],
+              ["T_CLI", "EXE", 0x20, File.binread("build_dos/t_cli.exe").b],
+              ["T_CMDS", "EXE", 0x20, File.binread("build_dos/t_cmds.exe").b],
+              ["T_REG410", "EXE", 0x20, File.binread("build_dos/t_reg410.exe").b],
+              ["T_WHITE", "EXE", 0x20, File.binread("build_dos/t_white.exe").b],
+              ["SEDPRG", "SED", 0x20, "s/foo/FROM_DOS/g#{crlf}".b],
+              ["SEDIN", "TXT", 0x20, "foo 123#{crlf}abba#{crlf}".b],
+              ["RUNTESTS", "BAT", 0x20, runtests_bat.b]
+            ]
+
+            entries.each_with_index do |(n8, e3, attr, data), idx|
+              cl = next_cl
+              if (attr & 0x10) != 0
+                next_cl += 1
+                [fat1_off, fat2_off].each { |fo| img[fo + cl * 2, 2] = [0xFFFF].pack("v") }
+                doff = d16_off + (cl - 2) * cl_bytes
+                img[doff, 32] = [".          ", 0x10, "", 0, 0x0021, cl, 0].pack("a11Ca10vvvV")
+                img[doff + 32, 32] = ["..         ", 0x10, "", 0, 0x0021, 0, 0].pack("a11Ca10vvvV")
+                sz = 0
+              else
+                n_cl = [1, (data.bytesize + cl_bytes - 1) / cl_bytes].max
+                n_cl.times do |i|
+                  c = cl + i
+                  nxt = (i == n_cl - 1) ? 0xFFFF : (c + 1)
+                  [fat1_off, fat2_off].each { |fo| img[fo + c * 2, 2] = [nxt].pack("v") }
+                end
+                doff = d16_off + (cl - 2) * cl_bytes
+                img[doff, data.bytesize] = data
+                next_cl += n_cl
+                sz = data.bytesize
+              end
+              raw11 = n8.ljust(8, " ") + e3.ljust(3, " ")
+              img[r16_off + idx * 32, 32] = [raw11, attr, "", 0, 0x0021, cl, sz].pack("a11Ca10vvvV")
+            end
+
+            File.binwrite(File.join(work, "dostest.img"), img)
           '
 
-          mcopy -i "$RUNNER_TEMP/dostest.img" "$RUNNER_TEMP/SEDPRG.SED" ::/SEDPRG.SED
-          mcopy -i "$RUNNER_TEMP/dostest.img" "$RUNNER_TEMP/SEDIN.TXT" ::/SEDIN.TXT
-          mdel -i "$RUNNER_TEMP/fdboot/x86BOOT.img" ::/FDCONFIG.SYS ::/FDAUTO.BAT ::/AUTOEXEC.BAT 2>/dev/null || true
-          mcopy -o -i "$RUNNER_TEMP/fdboot/x86BOOT.img" "$RUNNER_TEMP/FDCONFIG.SYS" ::/FDCONFIG.SYS
-          mcopy -o -i "$RUNNER_TEMP/fdboot/x86BOOT.img" "$RUNNER_TEMP/AUTOEXEC.BAT" ::/AUTOEXEC.BAT
-
-          timeout 180s qemu-system-i386 -m 64M -boot a -fda "$RUNNER_TEMP/fdboot/x86BOOT.img" -hda "$RUNNER_TEMP/dostest.img" -display none -no-reboot || true
-
-          mtype -i "$RUNNER_TEMP/dostest.img" ::/OUT.LOG | tee "$RUNNER_TEMP/dos_out.log"
+          timeout 180s qemu-system-i386 -m 64M -cpu pentium -drive "file=$RUNNER_TEMP/fdboot/boot_patched.img,format=raw,if=floppy" -drive "file=$RUNNER_TEMP/dostest.img,format=raw,if=ide" -boot a -display none -serial "file:$RUNNER_TEMP/dos_out.log"
+          cat "$RUNNER_TEMP/dos_out.log"
           grep -q "GNU sed) 4.10" "$RUNNER_TEMP/dos_out.log"
           grep -q "FROM_DOS 123" "$RUNNER_TEMP/dos_out.log"
           grep -q "===ALL_DOS_CTESTS_PASSED===" "$RUNNER_TEMP/dos_out.log"
+          ! grep -q "===DOS_CTEST_FAILED===" "$RUNNER_TEMP/dos_out.log"
 
       - name: Upload DOS Artifacts
         uses: actions/upload-artifact@v7

@@ -26,6 +26,12 @@ Script Parameters
   Optional output path for the filtered ``lcov.info`` tracefile
   (default: ``${BUILD_DIR}/lcov.info``).
 
+``GCOV_TOOL``
+  Optional path to a ``gcov``-compatible executable (or wrapper script) passed
+  via ``--gcov-tool`` to ``lcov --capture``. Auto-detected when ``BUILD_DIR``
+  was compiled with upstream LLVM ``clang`` (generating an ``llvm-cov gcov``
+  wrapper) or a version-suffixed ``gcc-<N>`` compiler.
+
 ``RESET_COUNTERS``
   When ``ON``, removes all existing ``*.gcda`` counter files under ``BUILD_DIR``
   before CTest runs so stale object-timestamp counters never mask execution.
@@ -208,20 +214,97 @@ if(CMAKE_SCRIPT_MODE_FILE STREQUAL CMAKE_CURRENT_LIST_FILE)
     find_program(_SED_LCOV_EXE NAMES lcov REQUIRED)
     set(_raw_info "${BUILD_DIR}/lcov_raw.info")
 
+    set(_gcov_tool_args "")
+    if(DEFINED GCOV_TOOL AND NOT "${GCOV_TOOL}" STREQUAL "")
+        list(APPEND _gcov_tool_args --gcov-tool "${GCOV_TOOL}")
+    elseif(EXISTS "${BUILD_DIR}/CMakeCache.txt")
+        file(STRINGS "${BUILD_DIR}/CMakeCache.txt" _cache_cid REGEX "^CMAKE_C_COMPILER_ID:INTERNAL=")
+        file(STRINGS "${BUILD_DIR}/CMakeCache.txt" _cache_cc REGEX "^CMAKE_C_COMPILER:(FILEPATH|STRING)=")
+        set(_cc_path "")
+        if(_cache_cc)
+            list(GET _cache_cc 0 _cc_line)
+            string(REGEX REPLACE "^CMAKE_C_COMPILER:(FILEPATH|STRING)=" "" _cc_path "${_cc_line}")
+        endif()
+        if(_cache_cid MATCHES "=Clang$" AND NOT APPLE)
+            set(_llvm_cov_candidates "")
+            if(_cc_path)
+                get_filename_component(_cc_dir "${_cc_path}" DIRECTORY)
+                get_filename_component(_cc_name "${_cc_path}" NAME)
+                if(_cc_name MATCHES "^clang(-[0-9]+)?$")
+                    list(APPEND _llvm_cov_candidates "llvm-cov${CMAKE_MATCH_1}")
+                endif()
+                list(APPEND _llvm_cov_candidates "llvm-cov")
+                find_program(_SED_LLVM_COV NAMES ${_llvm_cov_candidates} HINTS "${_cc_dir}")
+            else()
+                find_program(_SED_LLVM_COV NAMES llvm-cov)
+            endif()
+            if(_SED_LLVM_COV)
+                set(_wrapper "${BUILD_DIR}/sed_llvm_gcov.sh")
+                file(WRITE "${_wrapper}" "#!/bin/sh\nexec \"${_SED_LLVM_COV}\" gcov \"$@\"\n")
+                file(CHMOD "${_wrapper}"
+                    PERMISSIONS
+                        OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                        GROUP_READ GROUP_EXECUTE
+                        WORLD_READ WORLD_EXECUTE
+                )
+                list(APPEND _gcov_tool_args --gcov-tool "${_wrapper}")
+            endif()
+        elseif(_cache_cid MATCHES "=GNU$" AND _cc_path)
+            get_filename_component(_cc_dir "${_cc_path}" DIRECTORY)
+            get_filename_component(_cc_name "${_cc_path}" NAME)
+            if(_cc_name MATCHES "^gcc(-[0-9]+)$")
+                find_program(_SED_VER_GCOV NAMES "gcov${CMAKE_MATCH_1}" HINTS "${_cc_dir}")
+                if(_SED_VER_GCOV)
+                    list(APPEND _gcov_tool_args --gcov-tool "${_SED_VER_GCOV}")
+                endif()
+            endif()
+        endif()
+    endif()
+
+    execute_process(
+        COMMAND "${_SED_LCOV_EXE}" --version
+        OUTPUT_VARIABLE _lcov_ver
+        ERROR_VARIABLE _lcov_ver_err
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    set(_lcov_common_args "")
+    set(_lcov_cap_ignore "")
+    set(_lcov_ext_ignore "")
+    if("${_lcov_ver}" MATCHES [[LCOV version 1\.]])
+        list(APPEND _lcov_common_args
+            --rc lcov_branch_coverage=1
+            --rc "lcov_excl_br_line=LCOV_EXCL_BR_LINE|LCOV_EXCL_BR"
+        )
+    elseif("${_lcov_ver}" MATCHES [[LCOV version 2\.0([^0-9]|$)]])
+        list(APPEND _lcov_common_args
+            --rc branch_coverage=1
+            --rc "lcov_excl_br_line=LCOV_EXCL_BR_LINE|LCOV_EXCL_BR"
+        )
+        set(_lcov_cap_ignore --ignore-errors inconsistent,deprecated,unused,mismatch,negative,gcov)
+        set(_lcov_ext_ignore --ignore-errors inconsistent,deprecated,unused,mismatch,negative)
+    else()
+        list(APPEND _lcov_common_args
+            --rc branch_coverage=1
+            --rc "lcov_excl_br_line=LCOV_EXCL_BR_LINE|LCOV_EXCL_BR"
+        )
+        set(_lcov_cap_ignore --ignore-errors inconsistent,unsupported,deprecated,unused,mismatch,negative,gcov)
+        set(_lcov_ext_ignore --ignore-errors inconsistent,unsupported,deprecated,unused,mismatch,negative)
+    endif()
+
     execute_process(
         COMMAND "${_SED_LCOV_EXE}"
             --capture
             --directory "${BUILD_DIR}"
             --output-file "${_raw_info}"
-            --rc branch_coverage=1
-            --rc "lcov_excl_br_line=LCOV_EXCL_BR_LINE|LCOV_EXCL_BR"
-            --ignore-errors inconsistent,unsupported,deprecated,unused,mismatch,negative,gcov
+            ${_gcov_tool_args}
+            ${_lcov_common_args}
+            ${_lcov_cap_ignore}
         RESULT_VARIABLE _cap_rc
         OUTPUT_QUIET
-        ERROR_QUIET
+        ERROR_VARIABLE _cap_err
     )
     if(NOT _cap_rc EQUAL 0)
-        message(FATAL_ERROR "[VerifyCoverage] lcov --capture failed with exit code ${_cap_rc}")
+        message(FATAL_ERROR "[VerifyCoverage] lcov --capture failed with exit code ${_cap_rc}:\n${_cap_err}")
     endif()
 
     execute_process(
@@ -231,16 +314,15 @@ if(CMAKE_SCRIPT_MODE_FILE STREQUAL CMAKE_CURRENT_LIST_FILE)
             "*/tests/sed_test_harness.c"
             "*/tests/sed_test_inproc.c"
             --output-file "${LCOV_OUT}"
-            --rc branch_coverage=1
-            --rc "lcov_excl_br_line=LCOV_EXCL_BR_LINE|LCOV_EXCL_BR"
-            --ignore-errors inconsistent,unsupported,deprecated,unused,mismatch,negative
+            ${_lcov_common_args}
+            ${_lcov_ext_ignore}
         RESULT_VARIABLE _ext_rc
         OUTPUT_QUIET
-        ERROR_QUIET
+        ERROR_VARIABLE _ext_err
     )
     file(REMOVE "${_raw_info}")
     if(NOT _ext_rc EQUAL 0)
-        message(FATAL_ERROR "[VerifyCoverage] lcov --extract failed with exit code ${_ext_rc}")
+        message(FATAL_ERROR "[VerifyCoverage] lcov --extract failed with exit code ${_ext_rc}:\n${_ext_err}")
     endif()
 
     sed_verify_lcov_tracefile("${LCOV_OUT}")

@@ -16,12 +16,14 @@ if "%WATCOM%"=="" (
     )
 )
 
-set "PATH=%WATCOM%\binnt64;%WATCOM%\binnt;%PATH%"
+set "PATH=%WATCOM%\binnt64;%WATCOM%\binnt;%WATCOM%\binw;%PATH%"
 set "INCLUDE=%WATCOM%\h"
+set "EDPATH=%WATCOM%\eddat"
+set "WIPFC=%WATCOM%\wipfc"
 set "BUILD_DIR=build_dos"
 
 echo [sed-windows] Configuring GNU sed 4.10 for 32-bit MS-DOS (OpenWatcom)...
-cmake -S . -B "%BUILD_DIR%" -G "Watcom WMake" -DCMAKE_SYSTEM_NAME=DOS -DSED_TARGET_DOS=ON -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake -S . -B "%BUILD_DIR%" -G "Watcom WMake" -DCMAKE_SYSTEM_NAME=DOS -DCMAKE_SYSTEM_PROCESSOR=I386 -DCMAKE_C_COMPILER=wcl386 -DCMAKE_C_FLAGS_INIT="-bt=dos -mf -3r -zq" -DSED_TARGET_DOS=ON -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 if errorlevel 1 exit /b 1
 
 echo [sed-windows] Building 32-bit Protected-Mode DOS SED.EXE & C89 tests...

@@ -2,6 +2,8 @@ build/
 build_*/
 _deps/
 sed/
+auto-win-msvc/
+dist/
 coverage/
 coverage_*/
 *.gcda
