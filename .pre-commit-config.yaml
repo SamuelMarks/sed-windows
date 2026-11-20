@@ -1,0 +1,52 @@
+# =============================================================================
+# .pre-commit-config.yaml - Strict C89, Doc Coverage & Source Hygiene Gates
+# =============================================================================
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: mixed-line-ending
+        name: enforce LF line endings
+        args: [--fix=lf]
+        exclude: '\.(bat|cmd)$'
+      - id: mixed-line-ending
+        name: enforce CRLF line endings on batch scripts
+        args: [--fix=crlf]
+        files: '\.(bat|cmd)$'
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-added-large-files
+
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v22.1.5
+    hooks:
+      - id: clang-format
+        files: '^tests/.*\.(c|h)$'
+        args: [--style=LLVM, -i]
+
+  - repo: https://github.com/cpplint/cpplint
+    rev: 1.6.1
+    hooks:
+      - id: cpplint
+        files: '^tests/.*\.(c|h)$'
+        args:
+          - --filter=-legal/copyright,-build/include_subdir,-readability/casting,-whitespace/line_length,-build/header_guard,-runtime/int,-runtime/printf
+
+  - repo: local
+    hooks:
+      - id: forbid-non-test-c-sources
+        name: Forbid committed .c/.h files outside tests/ (use ../auto-win-msvc)
+        entry: Committed .c/.h/.h.in files outside tests/ are forbidden; polyfill in ../auto-win-msvc or generate at build time
+        language: fail
+        files: '^(?!tests/).*\.(c|h|h\.in)$'
+
+      - id: verify-c89-and-doc-coverage
+        name: Verify strict ISO C89 syntax, zero // comments, and 100% doc coverage
+        entry: cmake -DPROJECT_ROOT=. -P cmake/VerifyC89Strict.cmake
+        language: system
+        pass_filenames: false
+        always_run: true

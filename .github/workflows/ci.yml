@@ -1,0 +1,378 @@
+# =============================================================================
+# .github/workflows/ci.yml - CI/CD & Release Pipeline for sed-windows
+#
+# 1. qa-c89-and-coverage (ubuntu-latest):
+#    - Strict ISO C89 syntax (-std=c89 -pedantic-errors -Werror), zero //
+#      comments, 100% Doxygen & CMake .rst doc coverage, zero non-tests/ .c/.h
+#    - Pre-commit hooks (clang-format, cpplint, hygiene gates)
+#    - Host gcov/lcov C coverage gate & SHA-256 zero-upstream-edit verification
+# 2. build-windows-msvc (windows-latest, X64 & ARM64):
+#    - Native cl.exe build of sed.exe + strict-C89 test binaries
+#    - Full CTest suite + OpenCppCoverage gate on X64
+#    - CPack packaging (ZIP, NSIS .exe, WiX .msi)
+# 3. build-dos-openwatcom (ubuntu-latest):
+#    - OpenWatcom v2 32-bit DOS build of SED.EXE + strict-C89 (-za) test suites
+#    - Packages dos32, msdos-1.25, msdos-2.0, and msdos-4.0 ZIP archives with
+#      legacy-patched DOS32A.EXE
+#    - Headless QEMU x86 DOS execution of strict-C89 test binaries & SED.EXE
+# 4. release (ubuntu-latest, v* tags):
+#    - Publishes Windows & MS-DOS artifacts + SHA256SUMS.txt to GitHub Releases
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - master
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  qa-c89-and-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sed-windows
+        uses: actions/checkout@v7
+
+      - name: Checkout auto-win-msvc
+        uses: actions/checkout@v7
+        with:
+          repository: SamuelMarks/auto-win-msvc
+          path: auto-win-msvc
+
+      - name: Install C89 QA & Coverage Tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lcov clang-format
+          python3 -m pip install --upgrade pip pre-commit cpplint
+
+      - name: Verify Strict ISO C89, Zero // Comments & 100% Doc Coverage
+        run: |
+          cmake -DPROJECT_ROOT="$PWD" -P cmake/VerifyC89Strict.cmake
+
+      - name: Run Pre-Commit Hooks
+        run: |
+          pre-commit run --all-files
+
+      - name: Configure & Build Host Coverage Suite (GNU sed 4.10 + C89 Tests)
+        run: |
+          cmake -S . -B build_cov -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DSED_ENABLE_COVERAGE=ON -DAUTO_WIN_MSVC_DIR="$PWD/auto-win-msvc"
+          cmake --build build_cov --parallel
+
+      - name: Execute C89 CTest Suites & Enforce lcov 100% Coverage Gate
+        run: |
+          cmake --build build_cov --target coverage
+
+      - name: Verify Post-Test Upstream GNU sed 4.10 SHA-256 Immutability & README Shields
+        run: |
+          ./build_cov/t_hygien ./build_cov/sed
+          cmake -DREADME_PATH="$PWD/README.md" -DLCOV_INFO_PATH="$PWD/build_cov/lcov.info" -P cmake/UpdateCoverageShields.cmake
+          git diff --exit-code README.md
+
+  build-windows-msvc:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            msvc_arch: amd64
+            run_tests: true
+          - arch: arm64
+            msvc_arch: amd64_arm64
+            run_tests: false
+    steps:
+      - name: Checkout sed-windows
+        uses: actions/checkout@v7
+
+      - name: Checkout auto-win-msvc
+        uses: actions/checkout@v7
+        with:
+          repository: SamuelMarks/auto-win-msvc
+          path: auto-win-msvc
+
+      - name: Setup MSVC (${{ matrix.arch }})
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
+      - name: Configure & Build Native Windows Release (${{ matrix.arch }})
+        shell: cmd
+        run: |
+          cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.arch }} -DAUTO_WIN_MSVC_DIR="%CD%/auto-win-msvc"
+          cmake --build build --parallel
+
+      - name: Run Strict C89 CTest Suite (${{ matrix.arch }})
+        if: matrix.run_tests
+        shell: cmd
+        run: |
+          ctest --test-dir build --output-on-failure
+          build\sed.exe --version
+
+      - name: Run OpenCppCoverage Verification Gate (${{ matrix.arch }})
+        if: matrix.run_tests
+        shell: pwsh
+        run: |
+          choco install opencppcoverage -y --no-progress
+          $occ = Get-ChildItem "${env:ProgramFiles}\OpenCppCoverage\OpenCppCoverage.exe", "${env:ProgramFiles(x86)}\OpenCppCoverage\OpenCppCoverage.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $occ) { throw "OpenCppCoverage.exe not found" }
+          cmake -G Ninja -S . -B build_cov_win -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DSED_ENABLE_COVERAGE=ON -DSED_STATIC_CRT=OFF -DAUTO_WIN_MSVC_DIR="$PWD/auto-win-msvc"
+          cmake --build build_cov_win --parallel
+          & $occ.FullName --cover_children --export_type="cobertura:build_cov_win\coverage.xml" --sources "sed_test_harness.c" --sources "sed_test_inproc.c" --sources "sed\compile.c" --sources "sed\debug.c" --sources "sed\execute.c" --sources "sed\mbcs.c" --sources "sed\regexp.c" --sources "sed\sed.c" --sources "sed\utils.c" -- ctest --test-dir build_cov_win --output-on-failure
+          cmake -DPROJECT_ROOT="$PWD" -DCOBERTURA_XML="$PWD/build_cov_win/coverage.xml" -P cmake/VerifyCoverage.cmake
+
+      - name: Install NSIS & WiX Toolset (${{ matrix.arch }})
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis.exe -ErrorAction SilentlyContinue)) {
+            choco install nsis -y --no-progress
+          }
+          $nsisDir = @("${env:ProgramFiles(x86)}\NSIS", "${env:ProgramFiles}\NSIS") | Where-Object { Test-Path "$_\makensis.exe" } | Select-Object -First 1
+          if ($nsisDir) { echo "$nsisDir" >> $env:GITHUB_PATH }
+          if (-not (Get-Command candle.exe -ErrorAction SilentlyContinue)) {
+            choco install wixtoolset -y --no-progress
+          }
+          $wixBin = if ($env:WIX -and (Test-Path "$env:WIX\bin\candle.exe")) {
+            "$env:WIX\bin"
+          } else {
+            (Get-ChildItem "${env:ProgramFiles(x86)}\WiX Toolset*\bin\candle.exe", "${env:ProgramFiles}\WiX Toolset*\bin\candle.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).DirectoryName
+          }
+          if ($wixBin) { echo "$wixBin" >> $env:GITHUB_PATH }
+
+      - name: Package Windows ZIP, NSIS & WiX Installers (${{ matrix.arch }})
+        shell: pwsh
+        run: |
+          $ver = if ($env:GITHUB_REF -like "refs/tags/v*") {
+            $env:GITHUB_REF_NAME -replace '^v', ''
+          } else {
+            "4.10"
+          }
+          $pkgVer = if ($ver -match '^\d+\.\d+$') { "$ver.0" } elseif ($ver -match '^\d+\.\d+\.\d+(\.\d+)?$') { $ver } else { "4.10.0" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $baseName = "sed-$ver-win-${{ matrix.arch }}"
+          Push-Location build
+          cpack -G ZIP -D "CPACK_PACKAGE_VERSION=$pkgVer" -D "CPACK_PACKAGE_FILE_NAME=$baseName"
+          if (Get-Command makensis.exe -ErrorAction SilentlyContinue) {
+            cpack -G NSIS -D "CPACK_PACKAGE_VERSION=$pkgVer" -D "CPACK_PACKAGE_FILE_NAME=$baseName-setup"
+          }
+          if ((Get-Command candle.exe -ErrorAction SilentlyContinue) -and ("${{ matrix.arch }}" -eq "x64")) {
+            cpack -G WIX -D "CPACK_PACKAGE_VERSION=$pkgVer" -D "CPACK_PACKAGE_FILE_NAME=$baseName"
+          }
+          Pop-Location
+          Get-ChildItem build\sed-*.zip, build\sed-*.exe, build\sed-*.msi -ErrorAction SilentlyContinue | Copy-Item -Destination dist\ -Force
+          Copy-Item build\sed.exe -Destination "dist\$baseName.exe" -Force
+
+      - name: Upload Windows Artifacts (${{ matrix.arch }})
+        uses: actions/upload-artifact@v7
+        with:
+          name: sed-windows-${{ matrix.arch }}
+          path: dist/*
+
+  build-dos-openwatcom:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sed-windows
+        uses: actions/checkout@v7
+
+      - name: Checkout auto-win-msvc
+        uses: actions/checkout@v7
+        with:
+          repository: SamuelMarks/auto-win-msvc
+          path: auto-win-msvc
+
+      - name: Install OpenWatcom v2 & Headless QEMU x86 DOS Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 mtools unzip xz-utils curl ruby
+          mkdir -p "$RUNNER_TEMP/watcom"
+          curl -fsSL -o "$RUNNER_TEMP/ow.tar.xz" "https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/ow-snapshot.tar.xz"
+          tar -xJf "$RUNNER_TEMP/ow.tar.xz" -C "$RUNNER_TEMP/watcom"
+          echo "WATCOM=$RUNNER_TEMP/watcom" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/watcom/binl64:$RUNNER_TEMP/watcom/binw" >> "$GITHUB_PATH"
+
+      - name: Configure & Build SED.EXE + Strict-C89 (-za) DOS Test Binaries
+        run: |
+          export INCLUDE="$WATCOM/h"
+          export EDPATH="$WATCOM/eddat"
+          export WIPFC="$WATCOM/wipfc"
+          cat > "$RUNNER_TEMP/dos_toolchain.cmake" <<EOF
+          set(CMAKE_SYSTEM_NAME DOS)
+          set(CMAKE_SYSTEM_PROCESSOR I86)
+          set(WATCOM ON)
+          set(CMAKE_C_COMPILER "$WATCOM/binl64/wcl386")
+          EOF
+          cmake -G "Watcom WMake" -S . -B build_dos -DCMAKE_TOOLCHAIN_FILE="$RUNNER_TEMP/dos_toolchain.cmake" -DCMAKE_BUILD_TYPE=Release -DSED_TARGET_DOS=ON -DBUILD_TESTING=ON -DAUTO_WIN_MSVC_DIR="$PWD/auto-win-msvc"
+          cmake --build build_dos
+
+      - name: Package DOS32 & Legacy MS-DOS (1.25, 2.0, 4.0) Release Archives
+        run: |
+          VER="4.10"
+          if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF_NAME#v}"
+          fi
+          mkdir -p dist
+          (cd build_dos && cpack -G ZIP -D "CPACK_PACKAGE_FILE_NAME=sed-${VER}-dos32")
+          cp build_dos/sed-*-dos32.zip dist/
+
+          ruby -e '
+            raw = File.binread(File.join(ENV.fetch("WATCOM"), "binw", "dos32a.exe")).b
+            hdr_paras = raw[0x08, 2].unpack1("v")
+            hdr_bytes = hdr_paras * 16
+            rem = hdr_bytes % 512
+            if rem != 0
+              pad = 512 - rem
+              new_hdr_bytes = hdr_bytes + pad
+              raw = raw[0, hdr_bytes] + ((0.chr * pad).b) + raw[hdr_bytes..]
+              raw[0x08, 2] = [new_hdr_bytes / 16].pack("v")
+              last_b = raw[0x02, 2].unpack1("v")
+              pages  = raw[0x04, 2].unpack1("v")
+              orig_sz = last_b == 0 ? (pages * 512) : ((pages - 1) * 512 + last_b)
+              if raw.bytesize >= orig_sz - pad
+                new_sz = orig_sz + pad
+                raw[0x02, 2] = [new_sz % 512].pack("v")
+                raw[0x04, 2] = [(new_sz + 511) / 512].pack("v")
+              end
+              if raw.bytesize >= 0x40
+                e_lfanew = raw[0x3C, 4].unpack1("V")
+                if e_lfanew >= hdr_bytes && (e_lfanew + pad) < raw.bytesize &&
+                   %w[LE LX NE PE].include?(raw[e_lfanew, 2])
+                  raw[0x3C, 4] = [e_lfanew + pad].pack("V")
+                end
+              end
+            end
+            old_seq = [0xFA, 0xB4, 0x4A, 0xCD, 0x21, 0x72, 0x09].pack("C*")
+            new_seq = [0xFA, 0xB4, 0x4A, 0xCD, 0x21, 0x90, 0x90].pack("C*")
+            idx = raw.index(old_seq)
+            raw[idx, 7] = new_seq if idx
+            pat = [0xB8, 0xFF, 0x35, 0xCD, 0x21, 0x8C, 0xC3, 0x36].pack("C*")
+            pidx = raw.index(pat)
+            if pidx
+              stub = [0x31, 0xDB, 0x8E, 0xC3, 0x26, 0xC4, 0x1E, 0xFC, 0x03].pack("C*")
+              stub += ([0x90] * 14).pack("C*")
+              raw[pidx, stub.bytesize] = stub
+            end
+            File.binwrite(ARGV[0], raw)
+          ' "$RUNNER_TEMP/DOS32A_LEGACY.EXE"
+
+          for dos_ver in 1.25 2.0 4.0; do
+            STAGE="$RUNNER_TEMP/stage_msdos_${dos_ver}"
+            mkdir -p "$STAGE/bin" "$STAGE/licenses"
+            cp build_dos/sed.exe "$STAGE/bin/SED.EXE"
+            if [[ "$dos_ver" == "4.0" ]]; then
+              cp "$WATCOM/binw/dos32a.exe" "$STAGE/bin/DOS32A.EXE"
+            else
+              cp "$RUNNER_TEMP/DOS32A_LEGACY.EXE" "$STAGE/bin/DOS32A.EXE"
+            fi
+            cp LICENSE-APACHE LICENSE-CC0 LICENSE-MIT "$STAGE/licenses/"
+            (cd "$STAGE" && zip -qr "$GITHUB_WORKSPACE/dist/sed-${VER}-msdos-${dos_ver}.zip" .)
+          done
+
+      - name: Run Headless QEMU x86 DOS CTest Verification
+        run: |
+          mkdir -p "$RUNNER_TEMP/fdboot"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/fd13.zip" "https://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/distributions/1.3/official/FD13-FloppyEdition.zip"
+          unzip -q "$RUNNER_TEMP/fd13.zip" "x86BOOT.img" -d "$RUNNER_TEMP/fdboot"
+
+          dd if=/dev/zero of="$RUNNER_TEMP/dostest.img" bs=1M count=32 status=none
+          mformat -i "$RUNNER_TEMP/dostest.img" -F -v SEDTEST ::
+          mcopy -i "$RUNNER_TEMP/dostest.img" "$WATCOM/binw/dos32a.exe" ::/DOS32A.EXE
+          mcopy -i "$RUNNER_TEMP/dostest.img" build_dos/sed.exe ::/SED.EXE
+          mcopy -i "$RUNNER_TEMP/dostest.img" build_dos/t_hygien.exe ::/T_HYGIEN.EXE
+          mcopy -i "$RUNNER_TEMP/dostest.img" build_dos/t_cli.exe ::/T_CLI.EXE
+          mcopy -i "$RUNNER_TEMP/dostest.img" build_dos/t_cmds.exe ::/T_CMDS.EXE
+          mcopy -i "$RUNNER_TEMP/dostest.img" build_dos/t_reg410.exe ::/T_REG410.EXE
+          mcopy -i "$RUNNER_TEMP/dostest.img" build_dos/t_white.exe ::/T_WHITE.EXE
+
+          ruby -e '
+            crlf = "#{13.chr}#{10.chr}"
+            bs = 92.chr
+            dir = ENV.fetch("RUNNER_TEMP")
+            File.binwrite(File.join(dir, "SEDPRG.SED"), "s/foo/FROM_DOS/g#{crlf}")
+            File.binwrite(File.join(dir, "SEDIN.TXT"), "foo 123#{crlf}abba#{crlf}")
+            File.binwrite(File.join(dir, "FDCONFIG.SYS"), [
+              "LASTDRIVE=Z",
+              "FILES=40",
+              "BUFFERS=20",
+              "SHELL=A:#{bs}COMMAND.COM A:#{bs} /E:1024 /P=A:#{bs}AUTOEXEC.BAT"
+            ].join(crlf) + crlf)
+            File.binwrite(File.join(dir, "AUTOEXEC.BAT"), [
+              "@ECHO OFF",
+              "C:",
+              "DOS32A.EXE SED.EXE --version > C:#{bs}OUT.LOG",
+              "IF ERRORLEVEL 1 GOTO FAIL",
+              "DOS32A.EXE SED.EXE -f SEDPRG.SED SEDIN.TXT >> C:#{bs}OUT.LOG",
+              "IF ERRORLEVEL 1 GOTO FAIL",
+              "DOS32A.EXE T_HYGIEN.EXE SED.EXE >> C:#{bs}OUT.LOG",
+              "IF ERRORLEVEL 1 GOTO FAIL",
+              "DOS32A.EXE T_CLI.EXE >> C:#{bs}OUT.LOG",
+              "IF ERRORLEVEL 1 GOTO FAIL",
+              "DOS32A.EXE T_CMDS.EXE >> C:#{bs}OUT.LOG",
+              "IF ERRORLEVEL 1 GOTO FAIL",
+              "DOS32A.EXE T_REG410.EXE >> C:#{bs}OUT.LOG",
+              "IF ERRORLEVEL 1 GOTO FAIL",
+              "DOS32A.EXE T_WHITE.EXE >> C:#{bs}OUT.LOG",
+              "IF ERRORLEVEL 1 GOTO FAIL",
+              "ECHO ===ALL_DOS_CTESTS_PASSED=== >> C:#{bs}OUT.LOG",
+              "GOTO DONE",
+              ":FAIL",
+              "ECHO ===DOS_CTEST_FAILED=== >> C:#{bs}OUT.LOG",
+              ":DONE"
+            ].join(crlf) + crlf)
+          '
+
+          mcopy -i "$RUNNER_TEMP/dostest.img" "$RUNNER_TEMP/SEDPRG.SED" ::/SEDPRG.SED
+          mcopy -i "$RUNNER_TEMP/dostest.img" "$RUNNER_TEMP/SEDIN.TXT" ::/SEDIN.TXT
+          mdel -i "$RUNNER_TEMP/fdboot/x86BOOT.img" ::/FDCONFIG.SYS ::/FDAUTO.BAT ::/AUTOEXEC.BAT 2>/dev/null || true
+          mcopy -o -i "$RUNNER_TEMP/fdboot/x86BOOT.img" "$RUNNER_TEMP/FDCONFIG.SYS" ::/FDCONFIG.SYS
+          mcopy -o -i "$RUNNER_TEMP/fdboot/x86BOOT.img" "$RUNNER_TEMP/AUTOEXEC.BAT" ::/AUTOEXEC.BAT
+
+          timeout 180s qemu-system-i386 -m 64M -boot a -fda "$RUNNER_TEMP/fdboot/x86BOOT.img" -hda "$RUNNER_TEMP/dostest.img" -display none -no-reboot || true
+
+          mtype -i "$RUNNER_TEMP/dostest.img" ::/OUT.LOG | tee "$RUNNER_TEMP/dos_out.log"
+          grep -q "GNU sed) 4.10" "$RUNNER_TEMP/dos_out.log"
+          grep -q "FROM_DOS 123" "$RUNNER_TEMP/dos_out.log"
+          grep -q "===ALL_DOS_CTESTS_PASSED===" "$RUNNER_TEMP/dos_out.log"
+
+      - name: Upload DOS Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: sed-dos-openwatcom
+          path: dist/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    needs:
+      - qa-c89-and-coverage
+      - build-windows-msvc
+      - build-dos-openwatcom
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Release Artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release_assets
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt
+        run: |
+          cd release_assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: release_assets/*
+          generate_release_notes: true
